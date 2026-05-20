@@ -274,7 +274,7 @@ process SUMMARIZE_COUNTS {
 
     script:
     """
-    summarize_counts.R --counts_dir . --output_prefix .
+    summarize_counts.R . .
     """
 }
 

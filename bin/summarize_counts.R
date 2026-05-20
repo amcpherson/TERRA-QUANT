@@ -3,25 +3,17 @@
 # summarize_counts.R
 # Merges individual HTSeq count files into a single matrix,
 # then splits out TERRA repeat and subtelomeric counts.
+#
+# Usage: summarize_counts.R <counts_dir> [output_dir]
 
-suppressPackageStartupMessages({
-  library(optparse)
-  library(dplyr)
-})
-
-option_list <- list(
-  make_option(c("-d", "--counts_dir"), type = "character", default = ".",
-              help = "Directory containing *.count.txt files"),
-  make_option(c("-o", "--output_prefix"), type = "character", default = ".",
-              help = "Output directory/prefix for result files")
-)
-
-opt <- parse_args(OptionParser(option_list = option_list))
+args <- commandArgs(trailingOnly = TRUE)
+counts_dir <- if (length(args) >= 1) args[1] else "."
+outdir     <- if (length(args) >= 2) args[2] else "."
 
 # Find count files
-count_files <- list.files(opt$counts_dir, pattern = "\\.count\\.txt$", full.names = TRUE)
+count_files <- list.files(counts_dir, pattern = "\\.count\\.txt$", full.names = TRUE)
 if (length(count_files) == 0) {
-  stop("No .count.txt files found in: ", opt$counts_dir)
+  stop("No .count.txt files found in: ", counts_dir)
 }
 
 cat("Found", length(count_files), "count files\n")
@@ -51,23 +43,22 @@ if (length(counts_list) > 1) {
 merged[is.na(merged)] <- 0
 
 # Write full raw counts matrix
-outdir <- opt$output_prefix
 write.csv(merged, file.path(outdir, "raw_counts_matrix.csv"), row.names = FALSE)
 cat("Wrote raw_counts_matrix.csv\n")
 
 # Identify TERRA features
-terra_repeat <- merged %>% filter(grepl("TERRA.*repeat", Gene, ignore.case = TRUE))
-terra_subtelo <- merged %>% filter(grepl("TERRA.*subtelo", Gene, ignore.case = TRUE))
+terra_repeat <- merged[grepl("TERRA.*repeat", merged$Gene, ignore.case = TRUE), ]
+terra_subtelo <- merged[grepl("TERRA.*subtelo", merged$Gene, ignore.case = TRUE), ]
 
 # Also grab ITS features
-its_features <- merged %>% filter(grepl("_ITS", Gene))
+its_features <- merged[grepl("_ITS", merged$Gene), ]
 
 # Combine TERRA subtelo + ITS into one table
-terra_subtelo_all <- bind_rows(terra_subtelo, its_features)
+terra_subtelo_all <- rbind(terra_subtelo, its_features)
 
 # Gene counts without any TERRA/ITS features
 terra_its_genes <- c(terra_repeat$Gene, terra_subtelo_all$Gene)
-gene_counts <- merged %>% filter(!Gene %in% terra_its_genes)
+gene_counts <- merged[!merged$Gene %in% terra_its_genes, ]
 
 # Write outputs
 write.csv(terra_repeat, file.path(outdir, "TERRA_repeat_counts.csv"), row.names = FALSE)
