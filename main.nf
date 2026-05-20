@@ -131,14 +131,14 @@ process CAT_FASTQ {
 
 process STAR_ALIGN {
     tag "${sample_id}"
-    publishDir "${params.outdir}/alignments", mode: 'copy', pattern: '*.bam*'
+    publishDir "${params.outdir}/alignments", mode: 'copy', pattern: '*.bam'
 
     input:
     tuple val(sample_id), path(r1), path(r2)
     path star_index
 
     output:
-    tuple val(sample_id), path("${sample_id}.Aligned.sortedByCoord.out.bam"), path("${sample_id}.Aligned.sortedByCoord.out.bam.bai"), emit: bam
+    tuple val(sample_id), path("${sample_id}.Aligned.sortedByCoord.out.bam"), emit: bam
     path "${sample_id}.Log.final.out", emit: log
 
     script:
@@ -151,8 +151,22 @@ process STAR_ALIGN {
         --readFilesIn ${r1} ${r2} \\
         --outSAMtype BAM SortedByCoordinate \\
         --outFileNamePrefix ${sample_id}.
+    """
+}
 
-    samtools index ${sample_id}.Aligned.sortedByCoord.out.bam
+process SAMTOOLS_INDEX {
+    tag "${sample_id}"
+    publishDir "${params.outdir}/alignments", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    tuple val(sample_id), path(bam), path("${bam}.bai"), emit: bam
+
+    script:
+    """
+    samtools index ${bam}
     """
 }
 
@@ -340,15 +354,18 @@ workflow {
     // ---- Step 3: Align ----
     STAR_ALIGN(CAT_FASTQ.out.merged_reads, ch_star_index)
 
+    // ---- Step 3b: Index BAM ----
+    SAMTOOLS_INDEX(STAR_ALIGN.out.bam)
+
     // ---- Step 4: Count ----
-    HTSEQ_COUNT(STAR_ALIGN.out.bam, ch_gtf)
+    HTSEQ_COUNT(SAMTOOLS_INDEX.out.bam, ch_gtf)
 
     // ---- Step 5: Summarize counts ----
     SUMMARIZE_COUNTS(HTSEQ_COUNT.out.counts.collect())
 
     // ---- Optional: bamCoverage ----
     if (params.run_bamcoverage) {
-        BAMCOVERAGE(STAR_ALIGN.out.bam)
+        BAMCOVERAGE(SAMTOOLS_INDEX.out.bam)
     }
 
     // ---- Optional: BBDuk telomeric content ----
