@@ -8,20 +8,22 @@
  *  T2T-CHM13 reference with custom TERRA/ITS annotations.
  *
  *  Usage:
- *    nextflow run main.nf --reads '/path/to/*_R{1,2}.fastq.gz' --star_index /path/to/star_index
- *
- *    # Single-end:
- *    nextflow run main.nf --reads '/path/to/*.fastq.gz' --single_end true --star_index /path/to/star_index
+ *    nextflow run main.nf --samplesheet samples.csv --star_index /path/to/star_index
  *
  *    # Build STAR index on-the-fly:
- *    nextflow run main.nf --reads '/path/to/*_R{1,2}.fastq.gz' --genome_fasta /path/to/chm13.fa
+ *    nextflow run main.nf --samplesheet samples.csv --genome_fasta /path/to/chm13.fa
+ *
+ *  Samplesheet CSV format (no header):
+ *    sample_id,fastq_r1,fastq_r2
+ *
+ *  Multiple rows per sample_id are allowed (lanes/runs will be merged).
  */
 
 nextflow.enable.dsl = 2
 
 // ---- Parameter validation ----
-if (!params.reads) {
-    error "ERROR: --reads parameter is required. Provide path to FASTQ files."
+if (!params.samplesheet) {
+    error "ERROR: --samplesheet is required. Provide a CSV with columns: sample,fastq_1,fastq_2"
 }
 if (!params.star_index && !params.genome_fasta) {
     error "ERROR: Provide either --star_index (pre-built) or --genome_fasta (to build index)."
@@ -32,8 +34,7 @@ log.info """
 =============================================================
  TERRA-QUANT  v1.0
 =============================================================
- reads        : ${params.reads}
- single_end   : ${params.single_end}
+ samplesheet  : ${params.samplesheet}
  star_index   : ${params.star_index ?: 'will be built from genome_fasta'}
  gtf          : ${params.gtf}
  strandedness : ${params.strandedness}
@@ -92,36 +93,40 @@ process TRIM_GALORE {
     publishDir "${params.outdir}/trimmed/${sample_id}", mode: 'copy', pattern: '*_fastqc.*'
 
     input:
-    tuple val(sample_id), path(reads)
+    tuple val(sample_id), path(r1), path(r2)
 
     output:
-    tuple val(sample_id), path("*{_val_1.fq.gz,_val_2.fq.gz,_trimmed.fq.gz}"), emit: trimmed_reads
+    tuple val(sample_id), path("*_val_1.fq.gz"), path("*_val_2.fq.gz"), emit: trimmed_reads
     path "*_trimming_report.txt", emit: reports
     path "*_fastqc.*",            emit: fastqc
 
     script:
-    def paired = reads instanceof List && reads.size() == 2
-    if (paired)
-        """
-        trim_galore \\
-            --paired \\
-            --quality ${params.trim_quality} \\
-            --fastqc \\
-            --illumina \\
-            --gzip \\
-            --cores ${task.cpus} \\
-            ${reads[0]} ${reads[1]}
-        """
-    else
-        """
-        trim_galore \\
-            --quality ${params.trim_quality} \\
-            --fastqc \\
-            --illumina \\
-            --gzip \\
-            --cores ${task.cpus} \\
-            ${reads}
-        """
+    """
+    trim_galore \\
+        --paired \\
+        --quality ${params.trim_quality} \\
+        --fastqc \\
+        --illumina \\
+        --gzip \\
+        --cores ${task.cpus} \\
+        ${r1} ${r2}
+    """
+}
+
+process CAT_FASTQ {
+    tag "${sample_id}"
+
+    input:
+    tuple val(sample_id), path(r1_files), path(r2_files)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_merged_R1.fq.gz"), path("${sample_id}_merged_R2.fq.gz"), emit: merged_reads
+
+    script:
+    """
+    cat ${r1_files} > ${sample_id}_merged_R1.fq.gz
+    cat ${r2_files} > ${sample_id}_merged_R2.fq.gz
+    """
 }
 
 process STAR_ALIGN {
@@ -129,7 +134,7 @@ process STAR_ALIGN {
     publishDir "${params.outdir}/alignments", mode: 'copy', pattern: '*.bam*'
 
     input:
-    tuple val(sample_id), path(reads)
+    tuple val(sample_id), path(r1), path(r2)
     path star_index
 
     output:
@@ -137,14 +142,13 @@ process STAR_ALIGN {
     path "${sample_id}.Log.final.out", emit: log
 
     script:
-    def read_files = reads instanceof List ? reads.join(' ') : reads
     """
     STAR \\
         --runThreadN ${task.cpus} \\
         --genomeDir ${star_index} \\
         --runMode alignReads \\
         --readFilesCommand zcat \\
-        --readFilesIn ${read_files} \\
+        --readFilesIn ${r1} ${r2} \\
         --outSAMtype BAM SortedByCoordinate \\
         --outFileNamePrefix ${sample_id}.
 
@@ -220,7 +224,7 @@ process BBDUK_TELO {
     publishDir "${params.outdir}/bbduk_telo", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(reads)
+    tuple val(sample_id), path(r1), path(r2)
     path telo_ref
 
     output:
@@ -228,31 +232,18 @@ process BBDUK_TELO {
     path "${sample_id}_telo_content*.fa",       emit: telo_reads
 
     script:
-    def paired = reads instanceof List && reads.size() == 2
-    if (paired)
-        """
-        bbduk.sh \\
-            overwrite=t \\
-            in=${reads[0]} \\
-            in2=${reads[1]} \\
-            ref=${telo_ref} \\
-            k=24 hdist=2 \\
-            threads=${task.cpus} \\
-            outm=${sample_id}_telo_content_R1.fa \\
-            outm2=${sample_id}_telo_content_R2.fa \\
-            stats=${sample_id}_telo_content.stats.txt
-        """
-    else
-        """
-        bbduk.sh \\
-            overwrite=t \\
-            in=${reads} \\
-            ref=${telo_ref} \\
-            k=24 hdist=2 \\
-            threads=${task.cpus} \\
-            outm=${sample_id}_telo_content.fa \\
-            stats=${sample_id}_telo_content.stats.txt
-        """
+    """
+    bbduk.sh \\
+        overwrite=t \\
+        in=${r1} \\
+        in2=${r2} \\
+        ref=${telo_ref} \\
+        k=24 hdist=2 \\
+        threads=${task.cpus} \\
+        outm=${sample_id}_telo_content_R1.fa \\
+        outm2=${sample_id}_telo_content_R2.fa \\
+        stats=${sample_id}_telo_content.stats.txt
+    """
 }
 
 process SUMMARIZE_COUNTS {
@@ -321,26 +312,38 @@ workflow {
         ch_star_index = STAR_INDEX.out.index
     }
 
-    // ---- Read input FASTQs ----
-    if (params.single_end) {
-        ch_reads = Channel
-            .fromPath(params.reads, checkIfExists: true)
-            .map { file -> tuple(file.simpleName, file) }
-    } else {
-        ch_reads = Channel
-            .fromFilePairs(params.reads, checkIfExists: true)
-    }
+    // ---- Parse samplesheet ----
+    // Format: sample,fastq_1,fastq_2
+    ch_reads = Channel
+        .fromPath(params.samplesheet, checkIfExists: true)
+        .splitCsv(header: true)
+        .map { row ->
+            def sample = row.sample
+            def r1 = file(row.fastq_1, checkIfExists: true)
+            def r2 = file(row.fastq_2, checkIfExists: true)
+            tuple(sample, r1, r2)
+        }
 
-    // ---- Step 1: Trim ----
+    // ---- Step 1: Trim (per FASTQ pair) ----
     TRIM_GALORE(ch_reads)
 
-    // ---- Step 2: Align ----
-    STAR_ALIGN(TRIM_GALORE.out.trimmed_reads, ch_star_index)
+    // ---- Step 2: Merge trimmed FASTQs per sample (if multiple pairs) ----
+    ch_trimmed_grouped = TRIM_GALORE.out.trimmed_reads
+        .groupTuple()
+        .map { sample_id, r1_list, r2_list ->
+            tuple(sample_id, r1_list.flatten(), r2_list.flatten())
+        }
 
-    // ---- Step 3: Count ----
+    // Only merge if needed, but CAT_FASTQ handles single pairs fine too
+    CAT_FASTQ(ch_trimmed_grouped)
+
+    // ---- Step 3: Align ----
+    STAR_ALIGN(CAT_FASTQ.out.merged_reads, ch_star_index)
+
+    // ---- Step 4: Count ----
     HTSEQ_COUNT(STAR_ALIGN.out.bam, ch_gtf)
 
-    // ---- Step 4: Summarize counts ----
+    // ---- Step 5: Summarize counts ----
     SUMMARIZE_COUNTS(HTSEQ_COUNT.out.counts.collect())
 
     // ---- Optional: bamCoverage ----
@@ -351,7 +354,7 @@ workflow {
     // ---- Optional: BBDuk telomeric content ----
     if (params.run_bbduk) {
         ch_telo_ref = Channel.value(file(params.telo_ref, checkIfExists: true))
-        BBDUK_TELO(TRIM_GALORE.out.trimmed_reads, ch_telo_ref)
+        BBDUK_TELO(CAT_FASTQ.out.merged_reads, ch_telo_ref)
     }
 
     // ---- Optional: YARN normalization ----
