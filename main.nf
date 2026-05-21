@@ -170,12 +170,27 @@ process SAMTOOLS_INDEX {
     """
 }
 
+process SAMTOOLS_NAME_SORT {
+    tag "${sample_id}"
+
+    input:
+    tuple val(sample_id), path(bam)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.namesorted.bam"), emit: bam
+
+    script:
+    """
+    samtools sort -n -@ ${task.cpus} ${bam} -o ${sample_id}.namesorted.bam
+    """
+}
+
 process HTSEQ_COUNT {
     tag "${sample_id}"
     publishDir "${params.outdir}/counts", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam), path(bai)
+    tuple val(sample_id), path(bam)
     path gtf
 
     output:
@@ -185,12 +200,12 @@ process HTSEQ_COUNT {
     """
     htseq-count \\
         -f bam \\
+        -r name \\
         -s ${params.strandedness} \\
         -t exon \\
         --idattr gene_name \\
         -m intersection-nonempty \\
         --nonunique all \\
-        -n ${task.cpus} \\
         ${bam} \\
         ${gtf} > ${sample_id}.count.txt
     """
@@ -357,8 +372,11 @@ workflow {
     // ---- Step 3b: Index BAM ----
     SAMTOOLS_INDEX(STAR_ALIGN.out.bam)
 
+    // ---- Step 3c: Name-sort BAM for htseq-count (avoids mate-pair buffer memory) ----
+    SAMTOOLS_NAME_SORT(STAR_ALIGN.out.bam)
+
     // ---- Step 4: Count ----
-    HTSEQ_COUNT(SAMTOOLS_INDEX.out.bam, ch_gtf)
+    HTSEQ_COUNT(SAMTOOLS_NAME_SORT.out.bam, ch_gtf)
 
     // ---- Step 5: Summarize counts ----
     SUMMARIZE_COUNTS(HTSEQ_COUNT.out.counts.collect())
