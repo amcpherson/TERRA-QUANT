@@ -202,7 +202,7 @@ process HTSEQ_COUNT {
         -f bam \\
         -r name \\
         -s ${params.strandedness} \\
-        -t exon \\
+        -t transcript \\
         --idattr gene_name \\
         -m intersection-nonempty \\
         --nonunique all \\
